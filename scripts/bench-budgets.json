@@ -1,0 +1,10 @@
+{
+  "_comment": "F5 性能预算门禁（10k 档，规划 F5-3）。基线：Apple M5 / Node v24.20.0 / macOS，2026-10-19 首轮实测（docs/benchmarks.md）×约 2 倍余量。单位 ms，中位数。键为 --scale 档位名；换参考机型时需重新基线化。",
+  "10k": {
+    "scan": 400,
+    "home": 12,
+    "views": 10,
+    "writebackOp": 0.05,
+    "batch": 500
+  }
+}
