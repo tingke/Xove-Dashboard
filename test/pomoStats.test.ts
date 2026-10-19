@@ -5,8 +5,8 @@ import {
 	pomoFilePath, pomoHourTotals, pomoRecentRecords, pomoSegmentTotals,
 	pomoTrendDays, pomoWeekdayBars, readPomoRecords, serializePomoRecords,
 	trimPomoRecords, writePomoRecords, POMO_FILE,
-} from './pomoStats.ts';
-import { fmtDate } from './taskLogic.ts';
+} from '../src/data/pomoStats.ts';
+import { fmtDate } from '../src/data/taskLogic.ts';
 
 /** 固定「今天」：2026-10-01 15:00 本地时间 */
 function now(): Date {
@@ -87,7 +87,7 @@ test('内存 adapter 读写 pomodoro.json', async () => {
 });
 
 test('summarize/pomoTrendDays 概览与趋势数据', async () => {
-	const { summarizePomo } = await import('./pomoStats.ts');
+	const { summarizePomo } = await import('../src/data/pomoStats.ts');
 	const today9 = new Date(2026, 9, 1, 9).getTime();
 	const yesterday = new Date(2026, 8, 30, 9).getTime();
 	const records = [

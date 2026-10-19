@@ -18,5 +18,5 @@
     "types": ["node"],
     "lib": ["DOM", "ES5", "ES6", "ES7", "ES2018", "ES2019", "ES2021"]
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "scripts/**/*.ts", "test/**/*.ts"]
 }

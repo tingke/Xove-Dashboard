@@ -1,16 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { TaskItem } from './taskParser.ts';
+import type { TaskItem } from '../src/data/taskParser.ts';
 import {
 	fmtDate, todayStr, nowFmt, fmtMD,
 	calcNextRemindDate, getTodayUniverse, getTodayTasks,
 	isDoneToday, isSkipToday, overdueDays, urgencyMeta,
-} from './taskLogic.ts';
+} from '../src/data/taskLogic.ts';
 
 function makeTask(partial: Partial<TaskItem> = {}): TaskItem {
 	return {
 		id: 'p/t.md', content: 't', status: '待办', priority: null,
-		startDate: null, dueDate: null, tags: [], type: '普通',
+		startDate: null, dueDate: null, startTime: null, tags: [], type: '普通',
 		repeatRule: null, reminder: [], notes: '', completeTime: null,
 		dailyNodes: {}, projectId: 'p', color: '#fff', sourceFile: 'p/t.md',
 		isOverdue: false, remindDate: null, parent: '', deps: [], archived: false,

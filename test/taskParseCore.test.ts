@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import {
 	taskFromFm, projectFromFm, parseDailyNodesFromBody, serializeDailyNodesBlock,
 	priorityWeight, STATUS_LIST, PRIORITY_LIST, TYPE_LIST,
-} from './taskParseCore.ts';
-import type { DailyNode } from './taskParseCore.ts';
+} from '../src/data/taskParseCore.ts';
+import type { DailyNode } from '../src/data/taskParseCore.ts';
 
 const TODAY = '2026-08-08';
 

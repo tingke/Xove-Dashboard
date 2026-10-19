@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { computeWindow, filterWithOrig } from './virtualList.ts';
+import { computeWindow, filterWithOrig } from '../src/data/virtualList.ts';
 
 test('computeWindow 空列表返回空窗口', () => {
 	assert.deepEqual(computeWindow({ scrollTop: 0, viewportHeight: 400, rowHeight: 40, total: 0 }), { start: 0, end: 0 });

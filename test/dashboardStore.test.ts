@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DashboardStore } from './dashboardStore.ts';
-import type { TaskItem } from './taskParseCore.ts';
+import { DashboardStore } from '../src/data/dashboardStore.ts';
+import type { TaskItem } from '../src/data/taskParseCore.ts';
 
 function makeTask(id: string): TaskItem {
 	return {
 		id, content: id, status: '待办', priority: null,
-		startDate: null, dueDate: null, tags: [], type: '普通',
+		startDate: null, dueDate: null, startTime: null, tags: [], type: '普通',
 		repeatRule: null, reminder: [], notes: '', completeTime: null,
 		dailyNodes: {}, projectId: 'p', color: '#fff', sourceFile: id,
 		isOverdue: false, remindDate: null, parent: '', deps: [],

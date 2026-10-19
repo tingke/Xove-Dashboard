@@ -25,6 +25,8 @@ export interface TaskItem {
 	priority: TaskPriority | null;
 	startDate: string | null;
 	dueDate: string | null;
+	/** F4 今日时间块：开始时间 HH:MM（无排程为 null） */
+	startTime: string | null;
 	tags: string[];
 	type: TaskType;
 	repeatRule: RepeatRule | null;
@@ -227,6 +229,7 @@ export function taskFromFm(
 		priority,
 		startDate: getString(fm, '开始日期'),
 		dueDate,
+		startTime: getString(fm, '开始时间'),
 		tags: (() => {
 			const t = getStringArray(fm, 'tags');
 			return t.length ? t : getStringArray(fm, '标签');
