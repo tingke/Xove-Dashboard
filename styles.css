@@ -2606,9 +2606,9 @@ input[type="date"].ad-modal-input { cursor: pointer; }
 }
 
 /* 底部编辑工具条（sticky，含删除/添加/完成） */
-.ad-editbar {
-  position: sticky; bottom: 10px;
-  margin: 16px auto 8px; width: max-content; max-width: 96%;
+.dashboard-plugin > .ad-editbar {
+  position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
+  margin: 0; width: max-content; max-width: 96%;
   display: flex; align-items: center; gap: 12px; padding: 10px 14px;
   background: var(--ad-s1); border: 1px solid var(--ad-line); border-radius: 999px;
   box-shadow: 0 8px 24px rgba(0,0,0,0.35); z-index: 60;
