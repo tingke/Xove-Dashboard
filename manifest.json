@@ -1,9 +1,9 @@
 {
   "id": "xove-dashboard",
   "name": "Xove Dashboard",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "minAppVersion": "1.8.0",
-  "description": "Turn your home tab into a customizable dashboard for capturing tasks, tracking projects, and reviewing your note activity.",
+  "description": "A home-tab command center: Gantt + seven linked project views, tasks with due reminders, idea board, heatmaps and countdowns — 100% plain Markdown, zero network.",
   "author": "xw",
   "isDesktopOnly": true
 }

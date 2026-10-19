@@ -9,6 +9,10 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: Record<string, ChangelogEntry> = {
+	'0.5.0': {
+		zh: '到期提醒：任务到达提醒日发送系统通知，点击通知打开任务详情；支持启动逾期汇总、勿扰时段与授权降级指引\n导入向导：三种来源一键导入——Tasks 语法任务行、Kanban 看板（列→状态映射）、Projects 笔记（字段映射模板可复用）；预览可调、重跑不重复、源文件不改写\n首启导览：四步上手（定位 / 七视图 / 布局演示 / 提醒与导入联动），设置中可随时重看\n今日时间块：首页时间线拖任务排程（15 分钟吸附、重叠分道、时刻刻度与当前时刻线），点块可开始番茄钟\n习惯打卡与周报：习惯用 frontmatter 免 JSON 定义，30 天格点打卡与连击（每周目标断档容忍）；周报卡展示近 4 周趋势与番茄汇总\n任务详情新增「打开源笔记」快捷按钮；TODO 卡新增「今日到期」徽标',
+		en: 'Due reminders: system notifications on the reminder day — click a notification to open the task; startup overdue digest, do-not-disturb window and authorization fallback guidance\nImport wizard: three sources in one flow — Tasks-syntax lines, Kanban boards (column → status mapping) and Projects notes (field mapping with reusable templates); adjustable preview, re-run safe, sources untouched\nFirst-run tour: 4 steps (positioning / seven views / layout demo / reminders & import), replayable from Settings → General\nToday schedule: drag tasks onto a home timeline (15-min snap, overlap lanes, hour ticks & now line); click a block to start a pomodoro\nHabits & weekly report: habits defined in frontmatter (no JSON), 30-day check-in grid with streaks (weekly-target gap tolerance); weekly report card with 4-week trends and pomodoro summary\nTask detail: quick "open source note" button; TODO card shows a due-today badge',
+	},
 	'0.4.1': {
 		zh: '样式合规重构：卡片拖拽、甘特插入线、日历、倒计时等处的静态样式从脚本内联迁移到 CSS 类，主题与用户自定义样式覆盖更容易\n发布产物附带构建来源证明（artifact attestation），可在 GitHub 上验证安装包确由本仓库源码构建',
 		en: 'Style-compliance refactor: static styles for card dragging, gantt drop-line, calendar and countdown moved from script inline styles to CSS classes, making theme & user-CSS overrides easier\nRelease assets now carry build provenance attestations, so anyone can verify the plugin files were built from this repository',
@@ -28,4 +32,4 @@ export const CHANGELOG: Record<string, ChangelogEntry> = {
 };
 
 /** 版本号按时间升序排列，用于遍历 (lastSeen, 当前] 之间的更新记录 */
-export const CHANGELOG_ORDER: string[] = ['0.3.0', '0.3.1', '0.4.0', '0.4.1'];
+export const CHANGELOG_ORDER: string[] = ['0.3.0', '0.3.1', '0.4.0', '0.4.1', '0.5.0'];

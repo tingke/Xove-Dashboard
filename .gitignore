@@ -20,3 +20,12 @@ Thumbs.db
 .idea/
 .vscode/
 *.iml
+
+# F5 性能基准生成数据
+.bench-vault/
+
+
+designs/
+
+# IDE share artifacts
+.trae-html-share-packages/

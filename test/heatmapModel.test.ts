@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
 	skylineCamera, morphCamera, project, depthOf, barHeight, levelOf, mondayOf, buildSkyline, weekMonths,
 	riseAt, easeInOutCubic, fitWeeks, focusWindow,
-} from './heatmapModel.ts';
+} from '../src/data/heatmapModel.ts';
 
 test('skylineCamera：窄 yaw(10°) + 34° 仰角（利于在宽卡里横向铺开）', () => {
 	const c = skylineCamera();
