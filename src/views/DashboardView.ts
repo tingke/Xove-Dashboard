@@ -1,4 +1,4 @@
-import { ItemView, Menu, Modal, TFile, TFolder, WorkspaceLeaf, App } from 'obsidian';
+import { ItemView, Menu, Modal, Notice, TFile, TFolder, WorkspaceLeaf, App } from 'obsidian';
 import { MOCK_DATA, DashboardData } from '../data/mockData';
 import { BannerSettings, DEFAULT_SETTINGS, DEFAULT_HOME_MODULES, CountdownSettings } from '../settings';
 import { BannerModal } from './BannerModal';
@@ -6,8 +6,12 @@ import { CardSettingsModal } from './CardSettingsModal';
 import { ConfirmModal } from './ConfirmModal';
 import { CountdownModal, defaultEventName, countdownModes } from './CountdownModal';
 import { TaskEditModal } from './TaskEditModal';
-import { TaskItem, ProjectInfo, TaskStatus, ProjectType, priorityWeight, NodeState, RepeatRule, serializeDailyNodesBlock, parseDailyNodesFromBody } from '../data/taskParser';
+import { TaskItem, ProjectInfo, TaskStatus, ProjectType, priorityWeight, NodeState, RepeatRule, serializeDailyNodesBlock, parseDailyNodesFromBody, parseFrontmatter } from '../data/taskParser';
 import { TaskStore } from '../data/taskStore';
+import { HABIT_GRID_DAYS, computeStreak, isDone as habitIsDone, lastNDays, parseHabit, toggleCheckin, weekStartOf } from '../data/habits';
+import type { HabitDef } from '../data/habits';
+import { HabitEditModal } from './HabitEditModal';
+import { WeeklyReportModal } from './WeeklyReportModal';
 import { writeFrontmatter as fmWriteFrontmatter, yamlScalar } from '../data/frontmatterWriter';
 import type { ParseIssue } from '../data/parserDiagnostics';
 import { DashboardStore } from '../data/dashboardStore';
@@ -17,7 +21,10 @@ import { HeatmapSkyline, type SkylineOptions } from './HeatmapSkyline';
 import { summarizePomo } from '../data/pomoStats';
 import { FOCUS_WEEKS } from '../data/heatmapModel';
 import { PomoStatsBoard, type DashboardPage } from './PomoStats';
+import { pomoDayKey } from '../data/pomoStats';
 import { fmtDate, todayStr, nowFmt, calcNextRemindDate, getTodayUniverse, getTodayTasks, isDoneToday, isSkipToday, overdueDays } from '../data/taskLogic';
+import { dueHitOffset } from '../data/reminderLogic';
+import { collectTimeblockTasks, layoutBlocks, clampRange, snapDropToSlot, hhmmToMin, minToHHmm, BLOCK_MINUTES } from '../data/timeBlocks';
 import { t, tArr, isEnglish } from '../i18n';
 import { UI_TEXT } from '../constants';
 
@@ -253,6 +260,9 @@ export class DashboardView extends ItemView {
 		{ id: 'anchors', title: t('home.modules.anchors'), cardCls: 'ad-card ad-b-anchors', live: false, render: (b) => this.renderAnchors(b) },
 		{ id: 'recent', title: t('home.modules.recent'), cardCls: 'ad-card ad-b-recent', live: false, render: (b) => this.renderRecent(b) },
 		{ id: 'calweek', title: t('home.modules.week'), cardCls: 'ad-card ad-b-week', render: (b, t) => void this.renderWeekCard(b, t) },
+		{ id: 'schedule', title: t('home.modules.schedule'), cardCls: 'ad-card ad-b-schedule', render: (b, tasks) => void this.renderSchedule(b, tasks) },
+		{ id: 'habits', title: t('home.modules.habits'), cardCls: 'ad-card ad-b-habits', render: (b) => this.renderHabits(b) },
+		{ id: 'weekly-report', title: t('home.modules.weeklyReport'), cardCls: 'ad-card ad-b-weekly-report', render: (b, tasks) => void this.renderWeeklyReport(b, tasks) },
 	];
 
 	// Project overview state (renderer extracted into ProjectBoard)
@@ -1192,8 +1202,8 @@ export class DashboardView extends ItemView {
 		row.toggleClass('is-done', newStatus === '\u5DF2\u5B8C\u6210');
 	}
 
-	/** Write frontmatter fields to a file via the shared data-layer writer (CRLF-safe + YAML value escaping). */
-	async writeFrontmatter(file: TFile, updates: Record<string, string | null>): Promise<void> {
+	/** Write frontmatter fields to a file via the shared data-layer writer (CRLF-safe + YAML value escaping; 字符串数组 → 行内数组). */
+	async writeFrontmatter(file: TFile, updates: Record<string, string | string[] | null>): Promise<void> {
 		await fmWriteFrontmatter(this.app, file, updates);
 	}
 
@@ -1252,7 +1262,7 @@ export class DashboardView extends ItemView {
 		void this.refreshRelevant();
 	}
 
-	private async writeTaskField(task: TaskItem, fieldKey: string, value: string): Promise<void> {
+	private async writeTaskField(task: TaskItem, fieldKey: string, value: string | null): Promise<void> {
 		if (!task.sourceFile) return;
 		const file = this.app.vault.getAbstractFileByPath(task.sourceFile);
 		if (!(file instanceof TFile)) return;
@@ -1411,6 +1421,11 @@ export class DashboardView extends ItemView {
 				},
 			}).open();
 		})();
+	}
+
+	/** 提醒通知等外部路径修改任务后的刷新入口（main.ts 调用） */
+	refreshAfterExternalEdit(): void {
+		this.refreshRelevant();
 	}
 
 	/** Find the actual project folder by scanning vault */
@@ -2867,7 +2882,16 @@ export class DashboardView extends ItemView {
 
 			sorted.forEach((task) => {
 				const isDone = isDoneRow(task);
-				const row = list.createDiv({ cls: 'ad-todo__item' + (isDone ? ' is-done' : '') + (task.isOverdue ? ' is-overdue' : '') });
+				// 命中今日提醒窗口的未完成任务：行高亮 + 「今日到期 / N 天后到期」徽标（F1 设计稿 -01）
+				const remindOffset = !isDone && !task.isOverdue ? dueHitOffset(task, today) : null;
+				const row = list.createDiv({ cls: 'ad-todo__item' + (isDone ? ' is-done' : '') + (task.isOverdue ? ' is-overdue' : '') + (remindOffset !== null ? ' is-remind' : '') });
+
+				// F4：行可拖入「今日时间块」排程（布局编辑态下禁用，避免与卡片拖拽冲突）
+				row.setAttr('draggable', 'true');
+				row.addEventListener('dragstart', (e) => {
+					if (this.adEditMode) { e.preventDefault(); return; }
+					e.dataTransfer?.setData('text/plain', task.id);
+				});
 
 				// Circle click → toggle task (handles repeat tasks)
 				const check = row.createSpan({ cls: 'ad-todo__check' });
@@ -2886,6 +2910,12 @@ export class DashboardView extends ItemView {
 			// 优先级标签：纯文本无 emoji（不显示 🔴🟡🔵⚪ 圆点），胶囊样式参考本周待办的紧急标签（ad-wo__urg）
 			const prioLabel = task.priority ? UI_TEXT.prioText(task.priority) : t('common.notSet');
 			row.createSpan({ cls: 'ad-todo__tag', text: prioLabel, attr: { 'data-prio': task.priority || '' } });
+			if (remindOffset !== null) {
+				row.createSpan({
+					cls: 'ad-todo__tag ad-todo__tag--remind',
+					text: remindOffset === 0 ? t('home.dueTodayTag') : t('home.dueInTag', { n: remindOffset }),
+				});
+			}
 
 				// Right-click context menu
 				row.addEventListener('contextmenu', (e) => {
@@ -3515,6 +3545,325 @@ export class DashboardView extends ItemView {
 
 
 	/* ---- Pomodoro（番茄钟：单实例卡片） ---- */
+	/* ============================================================
+	   F4 今日时间块 — 今日时间线（规划 F4-1~5）
+	   今日归属复用 getTodayTasks 口径；块时长固定 60 分钟（唯一时间字段「开始时间」）；
+	   落点 15 分钟吸附；重叠分道并列；过去块灰显；写入走统一 frontmatter 通道。
+	   ============================================================ */
+	private renderSchedule(board: HTMLElement, allTasks?: TaskItem[]): void {
+		const card = this.getOrCreateCard(board, 'ad-card ad-b-schedule');
+		const today = todayStr();
+		const tasks = allTasks ?? [];
+		const range = clampRange(`${this.plugin.settings.scheduleFromHour ?? 7}:00`, `${this.plugin.settings.scheduleToHour ?? 23}:00`);
+		const rangeMin = Math.max(60, range.end - range.start);
+		const HOUR_PX = 44;
+		const pxPerMin = HOUR_PX / 60;
+
+		// 卡头：范围提示 + 常驻拖拽引导（用户反馈：拖拽操作难发现）
+		const headExtra = createDiv({ cls: 'ad-sched__headextra' });
+		headExtra.createSpan({ cls: 'ad-card__hint', text: `${minToHHmm(range.start)}–${minToHHmm(range.end)} · ${t('home.schedHeadHint')}` });
+		this.cardHead(card, '◷', t('home.modules.schedule'), undefined, headExtra);
+
+		const body = card.createDiv({ cls: 'ad-sched' });
+		// 两栏：左侧刻度列（小时标签常驻可见，用户反馈）+ 右侧轨道（刻度线/块/now 线/指示线）
+		const timeline = body.createDiv({ cls: 'ad-sched__timeline' });
+		timeline.style.height = `${Math.round((rangeMin / 60) * HOUR_PX)}px`;
+		const gutter = timeline.createDiv({ cls: 'ad-sched__gutter' });
+		const track = timeline.createDiv({ cls: 'ad-sched__track' });
+
+		// 小时/半小时刻度：小时标签进刻度列，刻度线在轨道
+		for (let m = range.start; m <= range.end; m += 30) {
+			const isHour = m % 60 === 0;
+			const top = `${Math.round((m - range.start) * pxPerMin)}px`;
+			if (isHour) {
+				const label = gutter.createDiv({ cls: 'ad-sched__hour', text: minToHHmm(m) });
+				label.style.top = top;
+			}
+			const tick = track.createDiv({ cls: 'ad-sched__tick' + (isHour ? ' is-hour' : ' is-half') });
+			tick.style.top = top;
+		}
+
+		const ratioToMin = (clientY: number): number => {
+			const rect = track.getBoundingClientRect();
+			return snapDropToSlot((clientY - rect.top) / Math.max(1, rect.height), range.start, range.end);
+		};
+		const byId = new Map(tasks.map((t2) => [t2.id, t2]));
+
+		// 拖放指示线 + 落点排程
+		const indicator = track.createDiv({ cls: 'ad-sched__indicator' });
+		timeline.addEventListener('dragover', (e) => {
+			if (this.adEditMode) return;
+			e.preventDefault();
+			if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+			indicator.style.top = `${Math.round((ratioToMin(e.clientY) - range.start) * pxPerMin)}px`;
+			indicator.addClass('is-on');
+		});
+		timeline.addEventListener('dragleave', () => indicator.removeClass('is-on'));
+		timeline.addEventListener('drop', (e) => {
+			e.preventDefault();
+			indicator.removeClass('is-on');
+			const task = byId.get(e.dataTransfer?.getData('text/plain') ?? '');
+			if (task) void this.scheduleTaskAt(task, ratioToMin(e.clientY));
+		});
+
+		// 已排块：重叠分道并列；过去块灰显；点击开详情；▶ 开始番茄钟；右键菜单；可拖动重排
+		const now = new Date();
+		const nowMin = now.getHours() * 60 + now.getMinutes();
+		const laid = layoutBlocks(collectTimeblockTasks(tasks, today));
+		for (const lb of laid) {
+			if (lb.endMin <= range.start || lb.startMin >= range.end) continue; // 完全在时间线外
+			const lanePct = 100 / lb.lanes;
+			const block = track.createDiv({ cls: 'ad-sched__block' + (lb.endMin <= nowMin ? ' is-past' : '') });
+			block.style.top = `${Math.round((Math.max(lb.startMin, range.start) - range.start) * pxPerMin)}px`;
+			block.style.height = `${Math.round(BLOCK_MINUTES * pxPerMin) - 2}px`;
+			block.style.width = `calc(${lanePct}% - 8px)`;
+			block.style.left = `calc(${lb.lane * lanePct}% + 4px)`;
+			block.createSpan({ cls: 'ad-sched__blocktime', text: minToHHmm(lb.startMin) });
+			block.createSpan({ cls: 'ad-sched__blockname', text: lb.task.content });
+			const play = block.createSpan({ cls: 'ad-sched__play', attr: { 'aria-label': t('home.pomoStart') }, text: '▶' });
+			play.addEventListener('click', (e) => {
+				e.stopPropagation();
+				this.pomoStart();
+				this.showToast(t('home.schedPomoStarted', { task: lb.task.content }));
+			});
+			block.addEventListener('click', () => this.openTaskEditModal(lb.task));
+			block.addEventListener('contextmenu', (e) => {
+				e.preventDefault();
+				const menu = new Menu();
+				menu.addItem((item) => item.setTitle(t('home.pomoStart')).setIcon('timer').onClick(() => { this.pomoStart(); this.showToast(t('home.schedPomoStarted', { task: lb.task.content })); }));
+				menu.addItem((item) => item.setTitle(t('home.schedCancel')).setIcon('x').onClick(() => void this.unscheduleTask(lb.task)));
+				menu.addItem((item) => item.setTitle(t('home.editTask')).setIcon('pencil').onClick(() => this.openTaskEditModal(lb.task)));
+				menu.showAtMouseEvent(e);
+			});
+			block.setAttr('draggable', 'true');
+			block.addEventListener('dragstart', (e) => {
+				if (this.adEditMode) { e.preventDefault(); return; }
+				e.dataTransfer?.setData('text/plain', lb.task.id);
+			});
+		}
+
+		// 当前时刻指示线（范围内才显示）
+		if (nowMin >= range.start && nowMin <= range.end) {
+			const nowLine = track.createDiv({ cls: 'ad-sched__now' });
+			nowLine.style.top = `${Math.round((nowMin - range.start) * pxPerMin)}px`;
+		}
+
+		// 拖拽排程引导（F4）：首次使用显示幽灵块，完成一次排程或点击引导后不再显示
+		if (!this.plugin.settings.schedCoachDone) {
+			const suggested = Math.ceil(nowMin / 60) * 60; // 最近的下一个整点
+			const coachMin = Math.max(range.start, Math.min(range.end - BLOCK_MINUTES, suggested));
+			const ghost = track.createDiv({ cls: 'ad-sched__coach', attr: { 'aria-label': t('home.schedCoach') } });
+			ghost.style.top = `${Math.round((coachMin - range.start) * pxPerMin)}px`;
+			ghost.style.height = `${Math.round(BLOCK_MINUTES * pxPerMin) - 2}px`;
+			ghost.createSpan({ cls: 'ad-sched__coach-text', text: t('home.schedCoach') });
+			ghost.addEventListener('click', () => {
+				this.plugin.settings.schedCoachDone = true;
+				void this.plugin.saveSettings();
+				this.refreshRelevant();
+			});
+		}
+
+		// 未排今日任务 chips：可拖入时间轴（与从 TODO 拖入等效的独立入口）；点击开详情
+		const unallocated = getTodayTasks(tasks, today, false).filter((t2) => hhmmToMin(t2.startTime) === null);
+		const strip = body.createDiv({ cls: 'ad-sched__unalloc' });
+		if (!unallocated.length && !laid.length) {
+			strip.createSpan({ cls: 'ad-sched__hint', text: t('home.schedEmpty') });
+		} else if (unallocated.length) {
+			strip.createSpan({ cls: 'ad-sched__hint', text: t('home.schedUnalloc') });
+			for (const t2 of unallocated.slice(0, 10)) {
+				const chip = strip.createSpan({ cls: 'ad-sched__chip', text: t2.content });
+				chip.setAttr('draggable', 'true');
+				chip.addEventListener('dragstart', (e) => {
+					if (this.adEditMode) { e.preventDefault(); return; }
+					if (e.dataTransfer) e.dataTransfer.effectAllowed = 'copy';
+					e.dataTransfer?.setData('text/plain', t2.id);
+				});
+				chip.addEventListener('click', () => this.openTaskEditModal(t2));
+			}
+			if (unallocated.length > 10) strip.createSpan({ cls: 'ad-sched__hint', text: `+${unallocated.length - 10}` });
+		}
+	}
+
+	/** F4 排程：写「开始时间」（HH:MM，落点已由 snap 吸附）；跨日拖入时改写提醒日期为今天（规划 F4-5） */
+	private async scheduleTaskAt(task: TaskItem, minutes: number): Promise<void> {
+		const hm = minToHHmm(minutes);
+		await this.writeTaskField(task, '开始时间', hm);
+		task.startTime = hm;
+		if (task.remindDate !== todayStr()) {
+			await this.writeTaskField(task, '提醒日期', todayStr());
+			task.remindDate = todayStr();
+			new Notice(t('home.schedDateMoved', { task: task.content }));
+		}
+		// 完成一次排程后收起拖拽引导
+		if (!this.plugin.settings.schedCoachDone) {
+			this.plugin.settings.schedCoachDone = true;
+			void this.plugin.saveSettings();
+		}
+		this.showToast(t('home.schedDone', { time: hm }));
+		this.refreshRelevant();
+	}
+
+	/** F4 取消排程：删除「开始时间」frontmatter 字段 */
+	private async unscheduleTask(task: TaskItem): Promise<void> {
+		await this.writeTaskField(task, '开始时间', null);
+		task.startTime = null;
+		this.showToast(t('home.schedCanceled'));
+		this.refreshRelevant();
+	}
+
+	/* ============================================================
+	   F6 习惯打卡 — 习惯 = habitsFolder 下的 Markdown 文件（frontmatter 免 JSON），
+	   30 天格点点击即打卡/取消（写「打卡」数组），连击含断档容忍（habits.computeStreak）。
+	   ============================================================ */
+	private renderHabits(board: HTMLElement): void {
+		const card = this.getOrCreateCard(board, 'ad-card ad-b-habits');
+		const today = todayStr();
+		const headExtra = createDiv({ cls: 'ad-habits__headextra' });
+		headExtra.createEl('button', { cls: 'ad-habits__add', attr: { 'aria-label': t('habits.add') }, text: '＋' })
+			.addEventListener('click', (e) => {
+				e.stopPropagation();
+				new HabitEditModal(this.app, this.plugin, null).open();
+			});
+		this.cardHead(card, '◈', t('home.modules.habits'), undefined, headExtra);
+		const body = card.createDiv({ cls: 'ad-habits' });
+		body.createDiv({ cls: 'ad-habits__empty', text: t('habits.loading') });
+
+		void this.loadHabits().then((habits) => {
+			body.empty();
+			if (!habits.length) {
+				body.createDiv({ cls: 'ad-habits__empty', text: t('habits.empty') });
+				return;
+			}
+			const days = lastNDays(HABIT_GRID_DAYS, today);
+			for (const h of habits) {
+				const row = body.createDiv({ cls: 'ad-habits__row' });
+				const head = row.createDiv({ cls: 'ad-habits__rowhead' });
+				const dot = head.createSpan({ cls: 'ad-habits__dot' });
+				dot.style.background = h.color;
+				const nameEl = head.createSpan({ cls: 'ad-habits__name', text: h.name });
+				nameEl.addEventListener('click', () => new HabitEditModal(this.app, this.plugin, h).open());
+				head.createSpan({ cls: 'ad-habits__streak', text: t('habits.streak', { n: computeStreak(h, today) }) });
+				const grid = row.createDiv({ cls: 'ad-habits__grid' });
+				for (const d of days) {
+					const cell = grid.createDiv({ cls: 'ad-habits__cell' + (habitIsDone(h, d) ? ' is-done' : '') + (d === today ? ' is-today' : '') });
+					cell.setAttribute('title', d);
+					cell.addEventListener('click', () => void this.toggleHabitCheckin(h, d));
+				}
+			}
+		});
+	}
+
+	/** 读取 habitsFolder 下全部习惯（解析 frontmatter；无「习惯/打卡」键的文件忽略） */
+	private async loadHabits(): Promise<HabitDef[]> {
+		const folderPath = this.plugin.settings.habitsFolder || '习惯';
+		const root = this.app.vault.getAbstractFileByPath(folderPath);
+		if (!(root instanceof TFolder)) return [];
+		const files: TFile[] = [];
+		const collect = (f: TFolder): void => {
+			for (const child of f.children) {
+				if (child instanceof TFolder) collect(child);
+				else if (child instanceof TFile && child.name.endsWith('.md') && !child.name.startsWith('project-')) files.push(child);
+			}
+		};
+		collect(root);
+		const contents = await Promise.all(files.map((f) => this.app.vault.cachedRead(f)));
+		const out: HabitDef[] = [];
+		for (let i = 0; i < files.length; i++) {
+			const f = files[i]!;
+			const h = parseHabit(f.path, parseFrontmatter(contents[i] ?? '', f.path));
+			if (h) out.push(h);
+		}
+		return out.sort((a, b) => a.name.localeCompare(b.name));
+	}
+
+	/** 打卡/取消某天：写「打卡」frontmatter 数组（统一写回通道，Dataview 可查） */
+	private async toggleHabitCheckin(habit: HabitDef, date: string): Promise<void> {
+		const file = this.app.vault.getAbstractFileByPath(habit.path);
+		if (!(file instanceof TFile)) return;
+		const dates = toggleCheckin(habit, date);
+		await this.writeFrontmatter(file, { '打卡': dates });
+		habit.checkins = dates;
+		this.showToast(t(habitIsDone(habit, date) ? 'habits.checked' : 'habits.unchecked', { date }));
+		this.refreshRelevant();
+	}
+
+	/* ============================================================
+	   F6 周报卡 — 回顾 + 趋势视角（区别于「本周待办」的行动清单）：
+	   本周完成 / 本周番茄 的近 4 周迷你趋势柱 + 较上周增减；当前逾期量。
+	   点击任意行弹明细（WeeklyReportModal）。
+	   ============================================================ */
+	private renderWeeklyReport(board: HTMLElement, allTasks?: TaskItem[]): void {
+		const card = this.getOrCreateCard(board, 'ad-card ad-b-weekly-report');
+		const today = todayStr();
+		const ws = weekStartOf(today);
+		const weDate = new Date(`${ws}T00:00:00`);
+		weDate.setDate(weDate.getDate() + 6);
+		const we = todayStr(weDate);
+		const tasks = allTasks ?? [];
+
+		// 近 4 周区间（升序，含本周）
+		const weeks: { ws: string; we: string }[] = [];
+		for (let i = 3; i >= 0; i--) {
+			const s = new Date(`${ws}T00:00:00`);
+			s.setDate(s.getDate() - i * 7);
+			const e = new Date(s);
+			e.setDate(s.getDate() + 6);
+			weeks.push({ ws: todayStr(s), we: todayStr(e) });
+		}
+		const doneCountIn = (a: string, b: string): number =>
+			tasks.filter((t2) => t2.status === '已完成' && (t2.completeTime ?? '').slice(0, 10) >= a && (t2.completeTime ?? '').slice(0, 10) <= b).length;
+		const overdue = tasks.filter((t2) => t2.isOverdue).length;
+
+		const headExtra = createDiv({ cls: 'ad-weekly__headextra' });
+		headExtra.createSpan({ cls: 'ad-card__hint', text: `${ws} ~ ${we}` });
+		this.cardHead(card, '📊', t('home.modules.weeklyReport'), undefined, headExtra);
+
+		const rows = card.createDiv({ cls: 'ad-weekly' });
+		rows.addEventListener('click', () => new WeeklyReportModal(this.app, this.plugin, tasks, ws, we).open());
+		const mkRow = (label: string): { valueEl: HTMLElement; deltaEl: HTMLElement; barsEl: HTMLElement } => {
+			const row = rows.createDiv({ cls: 'ad-weekly__row' });
+			row.createSpan({ cls: 'ad-weekly__label', text: label });
+			const barsEl = row.createDiv({ cls: 'ad-weekly__bars' });
+			const right = row.createDiv({ cls: 'ad-weekly__right' });
+			const valueEl = right.createSpan({ cls: 'ad-weekly__value', text: '…' });
+			const deltaEl = right.createSpan({ cls: 'ad-weekly__delta is-flat' });
+			return { valueEl, deltaEl, barsEl };
+		};
+
+		const fillTrend = (row: { valueEl: HTMLElement; deltaEl: HTMLElement; barsEl: HTMLElement }, counts: number[]): void => {
+			const cur = counts[counts.length - 1] ?? 0;
+			const prev = counts[counts.length - 2] ?? 0;
+			row.valueEl.setText(String(cur));
+			const diff = cur - prev;
+			row.deltaEl.setText(diff > 0 ? `▲ +${diff}` : diff < 0 ? `▼ ${diff}` : '±0');
+			row.deltaEl.className = 'ad-weekly__delta' + (diff > 0 ? ' is-up' : diff < 0 ? ' is-down' : ' is-flat');
+			const max = Math.max(...counts, 1);
+			row.barsEl.empty();
+			counts.forEach((c, i) => {
+				const bar = row.barsEl.createDiv({ cls: 'ad-weekly__bar' + (i === counts.length - 1 ? ' is-cur' : '') });
+				bar.style.height = `${Math.max(3, Math.round((c / max) * 22))}px`;
+				bar.setAttribute('title', String(c));
+			});
+		};
+
+		// 本周完成：趋势 + 较上周增减
+		fillTrend(mkRow(t('weekly.done')), weeks.map((w) => doneCountIn(w.ws, w.we)));
+		// 当前逾期：时点值（无趋势）
+		const odRow = mkRow(t('weekly.overdue'));
+		odRow.valueEl.setText(String(overdue));
+		odRow.deltaEl.setText(t('weekly.current'));
+		odRow.valueEl.addClass(overdue > 0 ? 'is-warn' : 'is-ok');
+		odRow.barsEl.addClass('is-empty');
+		// 本周番茄：趋势 + 较上周增减（异步）
+		const pomoRow = mkRow(t('weekly.pomo'));
+		void this.plugin.getPomoRecords().then((recs) => {
+			const perWeek = weeks.map((w) => recs
+				.filter((r) => { const d = pomoDayKey(r.ts); return d >= w.ws && d <= w.we; })
+				.reduce((s, r) => s + r.ms, 0));
+			fillTrend(pomoRow, perWeek.map((ms) => Math.round(ms / 60000)));
+		});
+	}
+
 	private renderPomodoro(board: HTMLElement): void {
 		const card = this.getOrCreateCard(board, 'ad-card ad-b-pomodoro');
 		// 卡头右侧仅保留「统计」按钮；工作/休息时长统一走右键「卡片设置」调整
@@ -3540,10 +3889,7 @@ export class DashboardView extends ItemView {
 				this.plugin.pomoState.running = false;
 				this.plugin.pomoState.endTime = 0;
 			} else {
-				this.plugin.pomoState.started = true;
-				this.plugin.pomoState.endTime = Date.now() + this.plugin.pomoState.remaining;
-				this.plugin.pomoState.running = true;
-				this.plugin.warmPomoAudio(); // 用户手势内预热音频，确保到点提示音可播放
+				this.pomoStart();
 			}
 			this.ensurePomoTimer();
 			this.syncPomoDom();
@@ -3620,6 +3966,19 @@ export class DashboardView extends ItemView {
 			dots.createDiv({ cls: 'ad-pomo__dot' + (n >= i ? ' is-on' : ''), text: '\uD83C\uDF45' });
 		}
 		if (n > 5) dots.createSpan({ cls: 'ad-pomo__more', text: `\uFF0B${n - 5}` });
+	}
+
+	/** 启动番茄钟（番茄钟卡片与时间块 ▶ 共用，F4-4）；运行中调用无效 */
+	private pomoStart(): void {
+		const s = this.plugin.pomoState;
+		if (s.running) return;
+		if (s.remaining <= 0) s.remaining = this.pomoDuration();
+		s.started = true;
+		s.endTime = Date.now() + s.remaining;
+		s.running = true;
+		this.plugin.warmPomoAudio(); // 用户手势内预热音频，确保到点提示音可播放
+		this.ensurePomoTimer();
+		this.syncPomoDom();
 	}
 
 	private pomoWorkMs(): number {

@@ -1,6 +1,11 @@
-import { App, Notice, PluginSettingTab, Setting, TFile, TFolder } from 'obsidian';
+import { App, Modal, Notice, PluginSettingTab, Setting, TFile, TFolder, setIcon } from 'obsidian';
 import Dashboard from './main';
 import type { BoardStage } from './data/opportunityParser';
+import type { ProjectTemplateMap } from './data/boardImport';
+import { ConfirmModal } from './views/ConfirmModal';
+import { ImportWizardModal } from './views/ImportWizardModal';
+import { OnboardingModal } from './views/OnboardingModal';
+import { notificationPermission } from './data/reminderNotifier';
 import { t, setLang, getLang } from './i18n';
 
 export interface BannerSettings {
@@ -48,6 +53,39 @@ export interface PomodoroSettings {
 	workMin: number;
 	/** 休息时长（分钟），默认 5 */
 	breakMin: number;
+}
+
+/** 提醒通知（F1）：到期系统通知 + 启动逾期汇总。
+ *  notifiedKeys / digestSentDate 为插件运行状态（去重记录），非业务数据。 */
+export interface ReminderSettings {
+	/** 到期提醒总开关（默认关闭，由首启导览引导开启，设计稿 -03 row-master） */
+	enabled: boolean;
+	/** 启动时逾期汇总通知 */
+	digest: boolean;
+	/** 勿扰时段开关（时段内不发系统通知） */
+	dndEnabled: boolean;
+	/** 勿扰开始 HH:mm */
+	dndFrom: string;
+	/** 勿扰结束 HH:mm（支持跨零点，如 22:00–08:00） */
+	dndTo: string;
+	/** 运行中扫描间隔（分钟），15/30/60 */
+	intervalMin: number;
+	/** 已通知去重记录：`${taskId}|${date}`（仅保留最近若干条） */
+	notifiedKeys?: string[];
+	/** 逾期汇总最近一次发送日期（当日只发一次） */
+	digestSentDate?: string;
+}
+
+/** F2 导入向导运行状态（插件状态，非业务数据）：按来源分账户的幂等键 FIFO 裁剪 + Projects 映射模板 */
+export interface ImportSettings {
+	/** 已导入任务的幂等键：`${源路径}::${规范化行内容}`（tasksImport.importKey） */
+	tasksKeys?: string[];
+	/** F2 阶段二：Kanban 看板导入幂等键 */
+	kanbanKeys?: string[];
+	/** F2 阶段二：Projects 导入幂等键 */
+	projectsKeys?: string[];
+	/** F2 阶段二：Projects 字段映射模板（名称 → 字段映射），保存复用 */
+	projectsTemplates?: ProjectTemplateMap;
 }
 
 /** 通用看板的一个阶段（看板列）— 结构定义见 src/data/opportunityParser.ts 的 BoardStage */
@@ -104,6 +142,18 @@ export interface DashboardSettings {
 	heatmapRange: 'rolling' | 'year';
 	/** 首页「锚点」卡片：收藏的 md 文件路径列表，数组顺序 = 显示/拖拽顺序 */
 	anchors: string[];
+	/** 提醒通知（F1）：到期系统通知 + 启动逾期汇总 */
+	reminder: ReminderSettings;
+	/** 导入向导（F2）运行状态：幂等去重键 */
+	imports?: ImportSettings;
+	/** 今日时间块时间线起始小时（F4，默认 7） */
+	scheduleFromHour: number;
+	/** 今日时间块时间线结束小时（F4，默认 23） */
+	scheduleToHour: number;
+	/** F4 拖拽排程引导：完成一次排程或点击引导后不再显示 */
+	schedCoachDone?: boolean;
+	/** F6 习惯文件目录（习惯 = 该目录下的 Markdown 文件，frontmatter 免 JSON） */
+	habitsFolder: string;
 	/** 界面语言：zh（中英结合，默认）/ en（纯英文） */
 	language: 'zh' | 'en';
 	/**
@@ -118,8 +168,9 @@ export interface DashboardSettings {
  * 每当「默认比例」发生变更、且需要覆盖用户 data.json 中的旧值时递增。
  * v2：修正 projects（项目情况）为宽 2 高 1；heatmap（笔记统计）最低宽 3 高 1（即 3:1）。
  * v3：默认布局重排为 快捕/todo/进度 各 1×1、本周待办 1×2、项目情况 3×1、笔记统计 3×1、倒计时 1×1。
+ * v4：默认布局加入「今日时间块」并紧邻 TODO（迁移时把曾自动追加到末尾的时间块归位到 TODO 之后）。
  */
-export const HOME_LAYOUT_VERSION = 3;
+export const HOME_LAYOUT_VERSION = 4;
 
 /** 首页单个模块的显隐/排序/比例配置 */
 export interface HomeModuleConfig {
@@ -178,19 +229,35 @@ export const DEFAULT_SETTINGS: DashboardSettings = {
 	heatmapFocus: false,
 	heatmapRange: 'rolling',
 	anchors: [],
+	reminder: {
+		// 总开关默认关（设计稿确认口径），由 F3 首启导览引导开启
+		enabled: false,
+		digest: true,
+		dndEnabled: false,
+		dndFrom: '22:00',
+		dndTo: '08:00',
+		intervalMin: 30,
+	},
+	imports: { tasksKeys: [] },
+	scheduleFromHour: 7,
+	scheduleToHour: 23,
+	habitsFolder: '习惯',
 	language: 'zh',
 	homeModules: [
 		{ id: 'quick-capture', enabled: true, order: 0, cols: 1, rows: 1 },
 		{ id: 'todo', enabled: true, order: 1, cols: 1, rows: 1 },
-		{ id: 'progress', enabled: true, order: 2, cols: 1, rows: 1 },
-		{ id: 'weekly', enabled: true, order: 3, cols: 1, rows: 2 },
-		{ id: 'projects', enabled: true, order: 4, cols: 3, rows: 1 },
-		{ id: 'heatmap', enabled: true, order: 5, cols: 3, rows: 1 },
-		{ id: 'countdown', enabled: true, order: 6, cols: 1, rows: 1 },
-		{ id: 'pomodoro', enabled: true, order: 7, cols: 1, rows: 1 },
-		{ id: 'anchors', enabled: true, order: 8, cols: 1, rows: 1 },
-		{ id: 'recent', enabled: true, order: 9, cols: 1, rows: 2 },
-		{ id: 'calweek', enabled: true, order: 10, cols: 4, rows: 1 },
+		{ id: 'schedule', enabled: true, order: 2, cols: 1, rows: 2 },
+		{ id: 'progress', enabled: true, order: 3, cols: 1, rows: 1 },
+		{ id: 'weekly', enabled: true, order: 4, cols: 1, rows: 2 },
+		{ id: 'projects', enabled: true, order: 5, cols: 3, rows: 1 },
+		{ id: 'heatmap', enabled: true, order: 6, cols: 3, rows: 1 },
+		{ id: 'countdown', enabled: true, order: 7, cols: 1, rows: 1 },
+		{ id: 'pomodoro', enabled: true, order: 8, cols: 1, rows: 1 },
+		{ id: 'anchors', enabled: true, order: 9, cols: 1, rows: 1 },
+		{ id: 'recent', enabled: true, order: 10, cols: 1, rows: 2 },
+		{ id: 'calweek', enabled: true, order: 11, cols: 4, rows: 1 },
+		{ id: 'habits', enabled: true, order: 12, cols: 1, rows: 2 },
+		{ id: 'weekly-report', enabled: true, order: 13, cols: 1, rows: 1 },
 	],
 };
 
@@ -198,15 +265,18 @@ export const DEFAULT_SETTINGS: DashboardSettings = {
 export const DEFAULT_HOME_MODULES: HomeModuleConfig[] = [
 	{ id: 'quick-capture', enabled: true, order: 0, cols: 1, rows: 1 },
 	{ id: 'todo', enabled: true, order: 1, cols: 1, rows: 1 },
-	{ id: 'progress', enabled: true, order: 2, cols: 1, rows: 1 },
-	{ id: 'weekly', enabled: true, order: 3, cols: 1, rows: 2 },
-	{ id: 'projects', enabled: true, order: 4, cols: 3, rows: 1 },
-	{ id: 'heatmap', enabled: true, order: 5, cols: 3, rows: 1 },
-	{ id: 'countdown', enabled: true, order: 6, cols: 1, rows: 1 },
-	{ id: 'pomodoro', enabled: true, order: 7, cols: 1, rows: 1 },
-	{ id: 'anchors', enabled: true, order: 8, cols: 1, rows: 1 },
-	{ id: 'recent', enabled: true, order: 9, cols: 1, rows: 2 },
-	{ id: 'calweek', enabled: true, order: 10, cols: 4, rows: 1 },
+	{ id: 'schedule', enabled: true, order: 2, cols: 1, rows: 2 },
+	{ id: 'progress', enabled: true, order: 3, cols: 1, rows: 1 },
+	{ id: 'weekly', enabled: true, order: 4, cols: 1, rows: 2 },
+	{ id: 'projects', enabled: true, order: 5, cols: 3, rows: 1 },
+	{ id: 'heatmap', enabled: true, order: 6, cols: 3, rows: 1 },
+	{ id: 'countdown', enabled: true, order: 7, cols: 1, rows: 1 },
+	{ id: 'pomodoro', enabled: true, order: 8, cols: 1, rows: 1 },
+	{ id: 'anchors', enabled: true, order: 9, cols: 1, rows: 1 },
+	{ id: 'recent', enabled: true, order: 10, cols: 1, rows: 2 },
+	{ id: 'calweek', enabled: true, order: 11, cols: 4, rows: 1 },
+	{ id: 'habits', enabled: true, order: 12, cols: 1, rows: 2 },
+	{ id: 'weekly-report', enabled: true, order: 13, cols: 1, rows: 1 },
 ];
 
 /* ---- helpers ---- */
@@ -283,6 +353,50 @@ export class DashboardSettingTab extends PluginSettingTab {
 					this.plugin.refreshLanguage();
 				});
 			});
+
+		// F3 首启导览：可随时从设置重看（规划 F3-1）
+		new Setting(containerEl)
+			.setName(t('settings.onbReplay'))
+			.setDesc(t('settings.onbReplayDesc'))
+			.addButton((btn) => btn
+				.setButtonText(t('settings.onbReplayBtn'))
+				.onClick(() => new OnboardingModal(this.app, this.plugin).open()));
+
+		// F4 今日时间块：时间线范围（规划 F4-1 可配时间范围，默认 7:00–23:00）
+		new Setting(containerEl)
+			.setName(t('settings.schedRange'))
+			.setDesc(t('settings.schedRangeDesc'))
+			.addDropdown((dd) => {
+				for (let h = 0; h <= 23; h++) dd.addOption(String(h), t('settings.schedHour', { h }));
+				dd.setValue(String(this.plugin.settings.scheduleFromHour ?? 7));
+				dd.onChange(async (v) => {
+					this.plugin.settings.scheduleFromHour = parseInt(v);
+					await this.plugin.saveSettings();
+					this.plugin.refreshDashboardAfterExternalEdit();
+				});
+			})
+			.addDropdown((dd) => {
+				for (let h = 0; h <= 23; h++) dd.addOption(String(h), t('settings.schedHour', { h }));
+				dd.setValue(String(this.plugin.settings.scheduleToHour ?? 23));
+				dd.onChange(async (v) => {
+					this.plugin.settings.scheduleToHour = parseInt(v);
+					await this.plugin.saveSettings();
+					this.plugin.refreshDashboardAfterExternalEdit();
+				});
+			});
+
+		// F6 习惯打卡：习惯文件目录（习惯 = 该目录下的 Markdown 文件）
+		new Setting(containerEl)
+			.setName(t('settings.habitsFolder'))
+			.setDesc(t('settings.habitsFolderDesc'))
+			.addText((tc) => tc
+				.setPlaceholder('习惯')
+				.setValue(this.plugin.settings.habitsFolder || '习惯')
+				.onChange(async (v) => {
+					this.plugin.settings.habitsFolder = v.trim() || '习惯';
+					await this.plugin.saveSettings();
+					this.plugin.refreshDashboardAfterExternalEdit();
+				}));
 
 		new Setting(containerEl)
 			.setName(t('settings.theme'))
@@ -483,6 +597,115 @@ export class DashboardSettingTab extends PluginSettingTab {
 			});
 		}
 
+		// F2 导入向导入口（规划触发点：设置 → 导入向导）
+		new Setting(containerEl)
+			.setName(t('settings.importOpen'))
+			.setDesc(t('settings.importOpenDesc'))
+			.addButton((btn) => btn
+				.setButtonText(t('settings.importOpenBtn'))
+				.onClick(() => new ImportWizardModal(this.app, this.plugin).open()));
+
+		/* ============ 提醒通知 ============ */
+		new Setting(containerEl).setName(t('settings.secReminder')).setHeading();
+
+		// 授权降级警示条：未授权/不支持时提醒将退为应用内提示（设计稿 -03 warn-strip）
+		const perm = notificationPermission();
+		if (perm !== 'granted') {
+			const warn = containerEl.createDiv({ cls: 'ad-reminder-warn' });
+			setIcon(warn.createSpan({ cls: 'ad-reminder-warn__icon' }), 'shield-alert');
+			warn.createSpan({
+				cls: 'ad-reminder-warn__text',
+				text: perm === 'unsupported' ? t('settings.reminderAuthUnsupported') : t('settings.reminderAuthWarn'),
+			});
+			const link = warn.createSpan({ cls: 'ad-reminder-warn__link', text: t('settings.reminderAuthHelp') });
+			link.addEventListener('click', () => new ReminderAuthModal(this.app, () => this.display()).open());
+		}
+
+		new Setting(containerEl)
+			.setName(t('settings.reminderEnable'))
+			.setDesc(t('settings.reminderEnableDesc'))
+			.addToggle((toggle) => toggle
+				.setValue(this.plugin.settings.reminder.enabled)
+				.onChange(async (v) => {
+					this.plugin.settings.reminder.enabled = v;
+					await this.plugin.saveSettings();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName(t('settings.reminderDigest'))
+			.setDesc(t('settings.reminderDigestDesc'))
+			.addToggle((toggle) => toggle
+				.setValue(this.plugin.settings.reminder.digest)
+				.onChange(async (v) => {
+					this.plugin.settings.reminder.digest = v;
+					await this.plugin.saveSettings();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName(t('settings.reminderDnd'))
+			.setDesc(t('settings.reminderDndDesc'))
+			.addText((tc) => tc
+				.setPlaceholder('22:00')
+				.setValue(this.plugin.settings.reminder.dndFrom)
+				.onChange(async (v) => { this.plugin.settings.reminder.dndFrom = v.trim() || '22:00'; await this.plugin.saveSettings(); }),
+			)
+			.addText((tc) => tc
+				.setPlaceholder('08:00')
+				.setValue(this.plugin.settings.reminder.dndTo)
+				.onChange(async (v) => { this.plugin.settings.reminder.dndTo = v.trim() || '08:00'; await this.plugin.saveSettings(); }),
+			)
+			.addToggle((toggle) => toggle
+				.setValue(this.plugin.settings.reminder.dndEnabled)
+				.onChange(async (v) => {
+					this.plugin.settings.reminder.dndEnabled = v;
+					await this.plugin.saveSettings();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName(t('settings.reminderInterval'))
+			.setDesc(t('settings.reminderIntervalDesc'))
+			.addDropdown((dropdown) => {
+				for (const n of [15, 30, 60]) dropdown.addOption(String(n), t('settings.reminderIntervalOpt', { n }));
+				dropdown.setValue(String(this.plugin.settings.reminder.intervalMin ?? 30));
+				dropdown.onChange(async (v) => {
+					this.plugin.settings.reminder.intervalMin = parseInt(v);
+					await this.plugin.saveSettings();
+					// 间隔变化需要重建轮询定时器
+					this.plugin.restartReminders();
+				});
+			});
+
+		// 恢复默认：四项还原出厂值并二次确认（去重记录属运行状态，保留）（设计稿 -03 settings-actions）
+		new Setting(containerEl)
+			.setName(t('settings.reminderReset'))
+			.setDesc(t('settings.reminderResetDesc'))
+			.addButton((btn) => btn
+				.setButtonText(t('settings.reminderReset'))
+				.onClick(() => {
+					new ConfirmModal({
+						app: this.app,
+						title: t('settings.reminderReset'),
+						message: t('settings.reminderResetMsg'),
+						confirmLabel: t('common.confirm'),
+						cancelLabel: t('common.cancel'),
+						onConfirm: () => {
+							const keep = this.plugin.settings.reminder;
+							this.plugin.settings.reminder = {
+								...DEFAULT_SETTINGS.reminder,
+								notifiedKeys: keep.notifiedKeys,
+								digestSentDate: keep.digestSentDate,
+							};
+							void this.plugin.saveSettings().then(() => {
+								this.plugin.restartReminders();
+								this.display();
+							});
+						},
+					}).open();
+				}));
+
 		/* ============ 看板 ============ */
 		new Setting(containerEl).setName(t('settings.secBoard')).setHeading();
 
@@ -663,5 +886,44 @@ export class DashboardSettingTab extends PluginSettingTab {
 		// Fallback for any stray element still in the DOM.
 		document.querySelectorAll('.dashboard-plugin').forEach((el) => el.setAttribute('data-theme', effective));
 		this.plugin.refreshThemeButtons();
+	}
+}
+
+/** 提醒通知授权指引弹窗：设置页警示条「查看授权方法」打开；请求授权成功后回调刷新设置页 */
+class ReminderAuthModal extends Modal {
+	constructor(app: App, private refresh: () => void) {
+		super(app);
+	}
+
+	onOpen(): void {
+		const { contentEl } = this;
+		contentEl.addClass('ad-task-modal');
+		contentEl.createEl('h3', { cls: 'ad-modal-title', text: t('settings.reminderAuthTitle') });
+		const perm = notificationPermission();
+		if (perm === 'granted') {
+			contentEl.createDiv({ cls: 'ad-modal-desc', text: t('settings.reminderAuthGranted') });
+		} else {
+			if (perm === 'unsupported') {
+				contentEl.createDiv({ cls: 'ad-modal-desc', text: t('settings.reminderAuthUnsupported') });
+			}
+			for (const key of ['reminderAuthMac', 'reminderAuthWin', 'reminderAuthLinux'] as const) {
+				contentEl.createDiv({ cls: 'ad-modal-desc', text: t(`settings.${key}`) });
+			}
+		}
+		const btns = contentEl.createDiv({ cls: 'ad-modal-btns' });
+		if (perm === 'default') {
+			btns.createEl('button', { cls: 'ad-modal-btn', text: t('settings.reminderAuthRequest') })
+				.addEventListener('click', () => {
+					try {
+						void Notification.requestPermission().then(() => this.refresh());
+					} catch { /* 忽略 */ }
+				});
+		}
+		btns.createEl('button', { cls: 'ad-modal-btn', text: t('common.close') })
+			.addEventListener('click', () => this.close());
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
 	}
 }

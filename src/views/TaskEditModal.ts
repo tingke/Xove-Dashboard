@@ -1,4 +1,4 @@
-import { App, Modal, Notice, TFile } from 'obsidian';
+import { App, Modal, Notice, TFile, setIcon } from 'obsidian';
 import { TaskItem, TaskStatus, TaskPriority, STATUS_LIST, PRIORITY_LIST, NodeState, DailyNode, serializeDailyNodesBlock, ProjectInfo } from '../data/taskParser';
 import { yamlScalar } from '../data/frontmatterWriter';
 import { UI_TEXT, MODAL_TEXT } from '../constants';
@@ -34,7 +34,22 @@ export class TaskEditModal extends Modal {
 		const task = this.opts.task;
 		contentEl.addClass('ad-task-modal');
 		this.containerEl.closest('.modal-container')?.addClass('dashboard-modal');
-		contentEl.createEl('h3', { cls: 'ad-modal-title', text: UI_TEXT.taskDetail });
+		// ---- Title row (title + quick-open source note button) ----
+		const titleRow = contentEl.createDiv({ cls: 'ad-modal-title-row' });
+		titleRow.createEl('h3', { cls: 'ad-modal-title', text: UI_TEXT.taskDetail });
+		const openNoteBtn = titleRow.createEl('button', {
+			cls: 'ad-modal-title-btn clickable-icon',
+			attr: { 'aria-label': t('modal.openNote') },
+		});
+		setIcon(openNoteBtn, 'file-text');
+		openNoteBtn.addEventListener('click', () => {
+			const f = this.app.vault.getAbstractFileByPath(task.sourceFile);
+			if (f instanceof TFile) {
+				void this.app.workspace.getLeaf('tab').openFile(f);
+			} else {
+				new Notice(t('modal.noteOpenFail'));
+			}
+		});
 
 		// ---- Title (editable name) ----
 		this.field(MODAL_TEXT.taskName, (wrap) => {

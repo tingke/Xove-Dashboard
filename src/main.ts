@@ -6,12 +6,17 @@ import { setLang, getLang, t, type Lang } from './i18n';
 import { POMO_SOUND_B64 } from './data/pomoSound';
 import { CHANGELOG, CHANGELOG_ORDER } from './changelog';
 import { UpdateLogModal } from './views/UpdateLogModal';
-import { WelcomeModal } from './views/WelcomeModal';
+import { OnboardingModal } from './views/OnboardingModal';
 import { todayStr } from './data/taskLogic';
 import {
 	appendPomoRecord, nextRoundFor, readPomoRecords, writePomoRecords,
 	type PomoFileAdapter, type PomoRecord,
 } from './data/pomoStats';
+import { TaskStore } from './data/taskStore';
+import { ReminderNotifier } from './data/reminderNotifier';
+import type { TaskItem } from './data/taskParser';
+import { TaskEditModal } from './views/TaskEditModal';
+import { ImportWizardModal } from './views/ImportWizardModal';
 
 /** 番茄钟运行时状态（与主页卡片共享，状态栏实时显示） */
 export interface PomoState {
@@ -24,6 +29,9 @@ export interface PomoState {
 	/** 未运行时的剩余时长（ms） */
 	remaining: number;
 }
+
+/** 新增首页模块的插入锚点（F4/F6）：补齐缺失模块时插到锚点卡之后（order 半步），让强关联卡天然相邻 */
+const MODULE_ANCHOR: Record<string, string> = { schedule: 'todo', habits: 'heatmap', 'weekly-report': 'weekly' };
 
 /** 持久化所需的最小文件系统能力（Obsidian 的 DataAdapter 结构性满足） */
 interface VaultFs {
@@ -56,6 +64,10 @@ export default class Dashboard extends Plugin {
 	private pomoRecordsLoading: Promise<PomoRecord[]> | null = null;
 	/** 记录写入串行化：上一笔尚未落盘时，下一笔排队等待，避免交错覆盖 */
 	private pomoWriteChain: Promise<void> = Promise.resolve();
+	/** 提醒通知扫描用的任务源（与首页 TODO 同一扫描语义，独立 300ms 缓存） */
+	private reminderStore: TaskStore | null = null;
+	/** F1 到期提醒通知器：启动核对 + 周期扫描 + 系统通知投递 */
+	private reminders: ReminderNotifier | null = null;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -74,9 +86,32 @@ export default class Dashboard extends Plugin {
 			},
 		});
 
+		// F2 导入向导（规划触发点：命令面板「从 Tasks 语法导入任务」）
+		this.addCommand({
+			id: 'import-tasks-syntax',
+			name: 'Import tasks from Tasks syntax',
+			callback: () => {
+				new ImportWizardModal(this.app, this).open();
+			},
+		});
+
 		this.addSettingTab(this.settingTab = new DashboardSettingTab(this.app, this));
 		this.setupAnchors();
 		this.watchExternalSettings();
+
+		// F1 到期提醒系统通知：启动核对（含逾期汇总）+ 周期扫描；数据与 TODO 卡同源
+		this.reminderStore = new TaskStore(this.app, () => ({
+			projectsFolder: this.settings.projectsFolder,
+			npdpStages: this.settings.npdpStages,
+		}));
+		this.reminders = new ReminderNotifier({
+			getSettings: () => this.settings.reminder,
+			getTasks: () => this.reminderStore!.scanAllTasks(),
+			persist: () => this.saveSettings(),
+			onActivate: () => { void this.activateView(); },
+			onOpenTask: (task) => { void this.openReminderTask(task); },
+		});
+		this.reminders.start();
 
 		// 番茄钟状态栏：右下角显示 🍅/☕ + 剩余时间（未开始时不显示）
 		this.pomoStatusEl = this.addStatusBarItem();
@@ -199,7 +234,9 @@ export default class Dashboard extends Plugin {
 		}
 	}
 
-	onunload(): void {}
+	onunload(): void {
+		this.reminders?.stop();
+	}
 
 	/**
 	 * 更新日志弹窗：首次安装（无 lastSeenVersion）不弹；
@@ -209,11 +246,11 @@ export default class Dashboard extends Plugin {
 		const current = this.manifest.version;
 		const lastSeen = this.settings.lastSeenVersion;
 		if (!lastSeen) {
-			// 首次安装：延迟弹「欢迎」介绍功能与上手，并把版本号记为本版，之后不再弹
+			// 首次安装：延迟弹四步首启导览（F3：定位/七视图/布局/上手联动），版本号记为本版，之后不再自动弹
 			this.settings.lastSeenVersion = current;
 			await this.saveSettings();
 			window.setTimeout(() => {
-				new WelcomeModal(this.app).open();
+				new OnboardingModal(this.app, this).open();
 			}, 600);
 			return;
 		}
@@ -251,6 +288,10 @@ export default class Dashboard extends Plugin {
 		//    迁移判断就永远不会触发（老用户的错误比例将无法被纠正）。
 		const storedLayoutVersion = typeof loaded.homeLayoutVersion === 'number' ? loaded.homeLayoutVersion : 0;
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded);
+		// 旧 data.json 的 reminder 可能只有部分字段（或结构不完整），与默认值合并，保证字段完整
+		if (loaded.reminder) {
+			this.settings.reminder = { ...DEFAULT_SETTINGS.reminder, ...loaded.reminder };
+		}
 		// 迁移：旧版「模板文件夹 + 模板文件名」合并为「模板文件（完整路径）」
 		for (const key of ['quickCapture', 'diary'] as const) {
 			const grp = loaded[key];
@@ -326,15 +367,29 @@ export default class Dashboard extends Plugin {
 		hm = hm.filter((m) => defaults.has(m.id));
 		if (hm.length !== beforePrune) { this.settings.homeModules = hm; changed = true; }
 
-		// 补齐 data.json 中缺失的模块（版本升级新增卡片时不丢卡）
+		// 补齐 data.json 中缺失的模块（版本升级新增卡片时不丢卡）。
+		// 带锚点的新卡（MODULE_ANCHOR）插到锚点卡之后（order 取半步，压实后相邻），其余追加末尾。
 		for (const d of DEFAULT_HOME_MODULES) {
-			if (!hm.some((m) => m.id === d.id)) {
+			if (hm.some((m) => m.id === d.id)) continue;
+			const anchorId = MODULE_ANCHOR[d.id];
+			const ai = anchorId ? hm.findIndex((m) => m.id === anchorId) : -1;
+			if (ai >= 0) {
+				hm.push({ ...d, order: (hm[ai]?.order ?? hm.length) + 0.5 });
+			} else {
 				hm.push({ ...d, order: hm.length });
-				changed = true;
 			}
+			changed = true;
 		}
 
 		const migrate = storedVersion < HOME_LAYOUT_VERSION;
+		// v4：把曾自动追加到末尾的「今日时间块」归位到 TODO 之后（order 半步，压实后相邻；
+		// 用户已手动挪过的（不在末位）不动）
+		if (migrate) {
+			const sched = hm.find((m) => m.id === 'schedule');
+			const maxOrder = hm.length ? Math.max(...hm.map((x) => x.order)) : -1;
+			const todo = hm.find((m) => m.id === 'todo');
+			if (sched && todo && sched.order === maxOrder) sched.order = todo.order + 0.5;
+		}
 		for (const m of hm) {
 			const d = defaults.get(m.id);
 			const dc = d?.cols ?? 1;
@@ -444,6 +499,41 @@ export default class Dashboard extends Plugin {
 		this.settings.homeModules = DEFAULT_HOME_MODULES.map((m) => ({ ...m }));
 		this.settings.homeLayoutVersion = HOME_LAYOUT_VERSION;
 		await this.saveSettings();
+	}
+
+	/** 设置页修改扫描间隔后，重启提醒轮询（start 内部先 stop，等效重建定时器） */
+	restartReminders(): void {
+		this.reminders?.start();
+	}
+
+	/** 点击单任务提醒通知：聚焦仪表盘并打开该任务详情（任务以最新扫描结果为准，设计稿 -01） */
+	private async openReminderTask(task: TaskItem): Promise<void> {
+		await this.activateView();
+		try {
+			const [tasks, projects] = await Promise.all([
+				this.reminderStore!.scanAllTasks(),
+				this.reminderStore!.scanAllProjects(),
+			]);
+			const current = tasks.find((t2) => t2.id === task.id) ?? task;
+			new TaskEditModal({
+				app: this.app,
+				task: current,
+				projects,
+				allTasks: tasks,
+				projectsFolder: this.settings.projectsFolder,
+				taskDetailMode: this.settings.taskDetailMode,
+				onSave: () => { this.refreshDashboardAfterExternalEdit(); },
+			}).open();
+		} catch (err) {
+			console.warn('[Dashboard] open reminder task failed', err);
+		}
+	}
+
+	/** 外部路径（提醒通知/导入向导）修改任务后刷新仪表盘视图 */
+	refreshDashboardAfterExternalEdit(): void {
+		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
+			if (leaf.view instanceof DashboardView) leaf.view.refreshAfterExternalEdit();
+		}
 	}
 
 	async saveSettings(): Promise<void> {
